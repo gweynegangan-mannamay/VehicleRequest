@@ -32,10 +32,10 @@ function sendGmail(
 
     $host     = 'smtp.gmail.com';
     $port     = 587;
-    $username = 'gweynegangan@gmail.com';
-    $password = 'qlnp dzan lexq zmpj';
-    $from     = 'ISU-Ilagan@gmail.com';
-    $fromName = 'VehiQuest - ISU Ilagan';
+    $username = MAIL_USERNAME;
+    $password = MAIL_PASSWORD;
+    $from     = MAIL_FROM_EMAIL;
+    $fromName = MAIL_FROM_NAME;
 
     if (empty($textBody)) {
         $textBody = wordwrap(strip_tags($htmlBody), 75, "\r\n");
@@ -175,11 +175,12 @@ function sendTicketReadyEmail(
     string $departureDate,
     string $driverName,
     string $vehicleName,
-    string $plateNumber
+    string $plateNumber,
+    int    $tripId = 0
 ): bool {
     $subject = "Your Trip Ticket is Ready – {$destination}";
-    $html    = _ticketEmailHtml($toName, $destination, $departureDate, $driverName, $vehicleName, $plateNumber);
-    $plain   = _ticketEmailText($toName, $destination, $departureDate, $driverName, $vehicleName, $plateNumber);
+    $html    = _ticketEmailHtml($toName, $destination, $departureDate, $driverName, $vehicleName, $plateNumber, $tripId);
+    $plain   = _ticketEmailText($toName, $destination, $departureDate, $driverName, $vehicleName, $plateNumber, $tripId);
 
     return sendGmail($toEmail, $toName, $subject, $html, $plain);
 }
@@ -188,7 +189,8 @@ function sendTicketReadyEmail(
 
 function _ticketEmailHtml(
     string $name, string $destination, string $departureDate,
-    string $driverName, string $vehicleName, string $plateNumber
+    string $driverName, string $vehicleName, string $plateNumber,
+    int $tripId = 0
 ): string {
     $n   = htmlspecialchars($name);
     $d   = htmlspecialchars($destination);
@@ -196,7 +198,8 @@ function _ticketEmailHtml(
     $dr  = htmlspecialchars($driverName);
     $v   = htmlspecialchars($vehicleName);
     $p   = htmlspecialchars($plateNumber);
-    $url = BASE_URL . '/user/index.php';
+    $dashboardUrl = BASE_URL . '/user/index.php';
+    $ticketUrl    = $tripId > 0 ? BASE_URL . '/user/ticket.php?trip_id=' . $tripId : $dashboardUrl;
 
     return <<<HTML
 <!DOCTYPE html>
@@ -256,11 +259,17 @@ function _ticketEmailHtml(
     </p>
 
     <div style="text-align:center;margin:28px 0;">
-      <a href="{$url}"
+      <a href="{$ticketUrl}"
          style="background:linear-gradient(135deg,#1e7e34,#f39c12);color:#fff;
                 padding:13px 32px;border-radius:25px;text-decoration:none;
-                font-weight:bold;font-size:14px;display:inline-block;">
-        View My Requests
+                font-weight:bold;font-size:14px;display:inline-block;margin:0 6px;">
+        📄 View &amp; Save Ticket
+      </a>
+      <a href="{$dashboardUrl}"
+         style="background:#6c757d;color:#fff;
+                padding:13px 32px;border-radius:25px;text-decoration:none;
+                font-weight:bold;font-size:14px;display:inline-block;margin:0 6px;">
+        My Requests
       </a>
     </div>
 
@@ -284,8 +293,13 @@ HTML;
 
 function _ticketEmailText(
     string $name, string $destination, string $departureDate,
-    string $driverName, string $vehicleName, string $plateNumber
+    string $driverName, string $vehicleName, string $plateNumber,
+    int $tripId = 0
 ): string {
+    $ticketUrl = $tripId > 0
+        ? BASE_URL . '/user/ticket.php?trip_id=' . $tripId
+        : BASE_URL . '/user/index.php';
+
     return "Hi {$name},\n\n"
          . "Your trip ticket is ready!\n\n"
          . "Destination  : {$destination}\n"
@@ -293,7 +307,7 @@ function _ticketEmailText(
          . "Driver       : {$driverName}\n"
          . "Vehicle      : {$vehicleName}\n"
          . "Plate Number : {$plateNumber}\n\n"
-         . "View your requests: " . BASE_URL . "/user/index.php\n\n"
+         . "View and save your ticket as PDF: {$ticketUrl}\n\n"
          . "Safe travels!\n"
          . "— VehiQuest Team, ISU Ilagan";
 }

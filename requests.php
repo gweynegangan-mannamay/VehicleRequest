@@ -46,16 +46,49 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action'])) {
     $request_data = $stmt_fetch->get_result()->fetch_assoc();
     
     if ($action == 'approve') {
-        $update_query = "UPDATE trip_requests SET status = 'approved', approved_by = ?, approved_at = NOW(), admin_notes = ? WHERE id = ?";
-        $stmt = $conn->prepare($update_query);
-        $stmt->bind_param("isi", $_SESSION['user_id'], $admin_notes, $request_id);
-        $stmt->execute();
-        $success_message = "Trip request approved successfully!";
-        
-        // Create notification for user
-        if ($request_data) {
-            notifyRequestApproved($conn, $request_data['user_id'], $request_id, $admin_notes);
-        }
+        // ── Conflict detection ───────────────────────────────
+        $dep_time = $request_data['departure_time'] ?? '00:00:00';
+        $ret_time = $request_data['return_time']    ?: '23:59:59';
+        $trip_date = $request_data['trip_date']     ?? '';
+
+        $conflict_check = $conn->prepare("
+            SELECT id, requester_name, destination, departure_time, return_time
+            FROM trip_requests
+            WHERE id        != ?
+              AND trip_date  = ?
+              AND status    IN ('approved', 'completed')
+              AND departure_time < ?
+              AND COALESCE(return_time, '23:59:59') > ?
+            LIMIT 1
+        ");
+        $conflict_check->bind_param("isss", $request_id, $trip_date, $ret_time, $dep_time);
+        $conflict_check->execute();
+        $conflict_row = $conflict_check->get_result()->fetch_assoc();
+
+        if ($conflict_row && !isset($_POST['force_approve'])) {
+            $conflict_warning = sprintf(
+                "⚠️ Scheduling conflict: Request #%d by %s to %s (%s – %s) overlaps this trip. " .
+                "Approve anyway by checking the box below.",
+                $conflict_row['id'],
+                htmlspecialchars($conflict_row['requester_name']),
+                htmlspecialchars($conflict_row['destination']),
+                date('g:i A', strtotime($conflict_row['departure_time'])),
+                $conflict_row['return_time']
+                    ? date('g:i A', strtotime($conflict_row['return_time']))
+                    : 'end of day'
+            );
+        } else {
+            // No conflict (or admin forced approval) — proceed
+            $update_query = "UPDATE trip_requests SET status = 'approved', approved_by = ?, approved_at = NOW(), admin_notes = ? WHERE id = ?";
+            $stmt = $conn->prepare($update_query);
+            $stmt->bind_param("isi", $_SESSION['user_id'], $admin_notes, $request_id);
+            $stmt->execute();
+            $success_message = "Trip request approved successfully!";
+
+            if ($request_data) {
+                notifyRequestApproved($conn, $request_data['user_id'], $request_id, $admin_notes);
+            }
+        } // end conflict check
     } elseif ($action == 'reject') {
         $update_query = "UPDATE trip_requests SET status = 'rejected', approved_by = ?, approved_at = NOW(), admin_notes = ? WHERE id = ?";
         $stmt = $conn->prepare($update_query);
@@ -68,7 +101,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action'])) {
             notifyRequestRejected($conn, $request_data['user_id'], $request_id, $admin_notes);
         }
     }
-}
+} // end POST handler
 
 // Fetch all trip requests
 $filter = $_GET['filter'] ?? 'all';
@@ -258,6 +291,38 @@ $stats = $stats_result->fetch_assoc();
             border-radius: 10px;
             margin-bottom: 20px;
         }
+
+        .alert-conflict {
+            background: #fff3cd;
+            color: #856404;
+            padding: 15px 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            border-left: 5px solid #ffc107;
+            font-size: 14px;
+            font-weight: 500;
+        }
+
+        .conflict-banner {
+            background: #fff3cd;
+            color: #856404;
+            border: 1px solid #ffc107;
+            border-left: 4px solid #e0a800;
+            border-radius: 8px;
+            padding: 10px 14px;
+            margin-bottom: 12px;
+            font-size: 13px;
+        }
+
+        .conflict-banner strong { display: block; margin-bottom: 4px; font-size: 13px; }
+
+        .conflict-item {
+            padding: 4px 0;
+            border-bottom: 1px solid rgba(0,0,0,0.06);
+            font-size: 12px;
+        }
+
+        .conflict-item:last-child { border-bottom: none; }
 
         .stats-row {
             display: grid;
@@ -618,6 +683,21 @@ $stats = $stats_result->fetch_assoc();
     <?php if (isset($success_message)): ?>
         <div class="alert-success">✓ <?php echo $success_message; ?></div>
     <?php endif; ?>
+    <?php if (isset($conflict_warning)): ?>
+        <div class="alert-conflict">
+            <?php echo $conflict_warning; ?>
+            <form method="POST" style="margin-top:10px;">
+                <input type="hidden" name="request_id" value="<?php echo intval($_POST['request_id']); ?>">
+                <input type="hidden" name="action" value="approve">
+                <input type="hidden" name="admin_notes" value="<?php echo htmlspecialchars($_POST['admin_notes'] ?? ''); ?>">
+                <input type="hidden" name="force_approve" value="1">
+                <label style="font-size:13px;cursor:pointer;">
+                    <input type="checkbox" onchange="this.form.submit()" style="margin-right:6px;">
+                    I understand the conflict — approve anyway
+                </label>
+            </form>
+        </div>
+    <?php endif; ?>
 
     <h2 class="page-title">📋 Trip Request Management</h2>
 
@@ -707,52 +787,92 @@ $stats = $stats_result->fetch_assoc();
 
 <script>
 function viewRequest(requestId) {
-    fetch('../api/get_request_details.php?id=' + requestId)
-        .then(response => response.json())
-        .then(data => {
-            // Build body content
-            let bodyHtml = '';
-            bodyHtml += '<div class="detail-row"><div class="detail-label">Request ID:</div><div class="detail-value">#' + data.id + '</div></div>';
-            bodyHtml += '<div class="detail-row"><div class="detail-label">Requester:</div><div class="detail-value">' + data.requester_name + '</div></div>';
-            bodyHtml += '<div class="detail-row"><div class="detail-label">Position:</div><div class="detail-value">' + data.requester_position + '</div></div>';
-            bodyHtml += '<div class="detail-row"><div class="detail-label">Department:</div><div class="detail-value">' + data.department + '</div></div>';
-            bodyHtml += '<div class="detail-row"><div class="detail-label">Passengers:</div><div class="detail-value">' + data.passenger_names + '</div></div>';
-            bodyHtml += '<div class="detail-row"><div class="detail-label">Destination:</div><div class="detail-value">' + data.destination + '</div></div>';
-            bodyHtml += '<div class="detail-row"><div class="detail-label">Purpose:</div><div class="detail-value">' + data.purpose + '</div></div>';
-            bodyHtml += '<div class="detail-row"><div class="detail-label">Trip Date:</div><div class="detail-value">' + data.trip_date + '</div></div>';
-            bodyHtml += '<div class="detail-row"><div class="detail-label">Departure Time:</div><div class="detail-value">' + data.departure_time + '</div></div>';
-            if (data.return_time) {
-                bodyHtml += '<div class="detail-row"><div class="detail-label">Return Time:</div><div class="detail-value">' + data.return_time + '</div></div>';
-            }
-            bodyHtml += '<div class="detail-row"><div class="detail-label">Status:</div><div class="detail-value"><span class="status-badge status-' + data.status + '">' + data.status + '</span></div></div>';
-            
-            document.getElementById('modalBody').innerHTML = bodyHtml;
-            
-            // Build footer content (actions)
-            let footerHtml = '';
-            if (data.status === 'pending') {
-                footerHtml += '<form method="POST">';
-                footerHtml += '<input type="hidden" name="request_id" value="' + data.id + '">';
-                footerHtml += '<textarea name="admin_notes" placeholder="Admin notes (optional)"></textarea>';
-                footerHtml += '<div class="action-buttons" style="margin-top:10px;">';
-                footerHtml += '<button type="submit" name="action" value="approve" class="btn-approve">✓ Approve</button>';
-                footerHtml += '<button type="submit" name="action" value="reject" class="btn-reject">✗ Reject</button>';
-                footerHtml += '</div></form>';
-            } else if (data.status === 'approved') {
-                footerHtml += '<div class="action-buttons">';
-                footerHtml += '<a href="create_ticket_from_request.php?request_id=' + data.id + '" class="btn-create-ticket">🎫 Create Trip Ticket</a>';
-                footerHtml += '</div>';
-            } else {
-                footerHtml += '';
-            }
-            
-            document.getElementById('modalFooter').innerHTML = footerHtml;
-            document.getElementById('requestModal').style.display = 'block';
-        });
+    // Run both fetches in parallel
+    Promise.all([
+        fetch('../api/get_request_details.php?id=' + requestId).then(r => r.json()),
+        fetch('../api/check_request_conflicts.php?id=' + requestId).then(r => r.json())
+    ]).then(([data, cd]) => {
+
+        // ── Request details ───────────────────────────────────
+        let bodyHtml = '';
+        bodyHtml += '<div class="detail-row"><div class="detail-label">Request ID:</div><div class="detail-value">#' + data.id + '</div></div>';
+        bodyHtml += '<div class="detail-row"><div class="detail-label">Requester:</div><div class="detail-value">' + data.requester_name + '</div></div>';
+        bodyHtml += '<div class="detail-row"><div class="detail-label">Position:</div><div class="detail-value">' + data.requester_position + '</div></div>';
+        bodyHtml += '<div class="detail-row"><div class="detail-label">Department:</div><div class="detail-value">' + data.department + '</div></div>';
+        bodyHtml += '<div class="detail-row"><div class="detail-label">Passengers:</div><div class="detail-value">' + formatPassengers(data.passenger_names) + '</div></div>';
+        bodyHtml += '<div class="detail-row"><div class="detail-label">Destination:</div><div class="detail-value">' + data.destination + '</div></div>';
+        bodyHtml += '<div class="detail-row"><div class="detail-label">Purpose:</div><div class="detail-value">' + data.purpose + '</div></div>';
+        bodyHtml += '<div class="detail-row"><div class="detail-label">Trip Date:</div><div class="detail-value">' + data.trip_date + '</div></div>';
+        bodyHtml += '<div class="detail-row"><div class="detail-label">Departure Time:</div><div class="detail-value">' + data.departure_time + '</div></div>';
+        if (data.return_time) {
+            bodyHtml += '<div class="detail-row"><div class="detail-label">Return Time:</div><div class="detail-value">' + data.return_time + '</div></div>';
+        }
+        bodyHtml += '<div class="detail-row"><div class="detail-label">Status:</div><div class="detail-value"><span class="status-badge status-' + data.status + '">' + data.status + '</span></div></div>';
+
+        // ── Conflict banner (pending requests only) ───────────
+        if (data.status === 'pending' && cd.conflicts && cd.conflicts.length > 0) {
+            bodyHtml += '<div class="conflict-banner" style="margin-top:12px;">';
+            bodyHtml += '<strong>⚠️ Scheduling conflict — ' + cd.conflicts.length + ' overlapping approved request' + (cd.conflicts.length > 1 ? 's' : '') + ' on this date/time:</strong>';
+            cd.conflicts.forEach(c => {
+                bodyHtml += '<div class="conflict-item">';
+                bodyHtml += '• <strong>Request #' + c.id + '</strong> &nbsp;' + c.requester_name + ' → ' + c.destination;
+                bodyHtml += ' &nbsp;|&nbsp; ' + c.trip_date + ' &nbsp;' + c.departure_time + ' – ' + c.return_time;
+                bodyHtml += ' &nbsp;<span class="status-badge status-' + c.status + '">' + c.status + '</span>';
+                bodyHtml += '</div>';
+            });
+            bodyHtml += '</div>';
+        }
+
+        document.getElementById('modalBody').innerHTML = bodyHtml;
+
+        // ── Footer actions ────────────────────────────────────
+        let footerHtml = '';
+        if (data.status === 'pending') {
+            footerHtml += '<form method="POST">';
+            footerHtml += '<input type="hidden" name="request_id" value="' + data.id + '">';
+            footerHtml += '<textarea name="admin_notes" placeholder="Admin notes (optional)"></textarea>';
+            footerHtml += '<div class="action-buttons" style="margin-top:10px;">';
+            footerHtml += '<button type="submit" name="action" value="approve" class="btn-approve">✓ Approve</button>';
+            footerHtml += '<button type="submit" name="action" value="reject" class="btn-reject">✗ Reject</button>';
+            footerHtml += '</div></form>';
+        } else if (data.status === 'approved') {
+            footerHtml += '<div class="action-buttons">';
+            footerHtml += '<a href="create_ticket_from_request.php?request_id=' + data.id + '" class="btn-create-ticket">🎫 Create Trip Ticket</a>';
+            footerHtml += '</div>';
+        }
+
+        document.getElementById('modalFooter').innerHTML = footerHtml;
+        document.getElementById('requestModal').style.display = 'block';
+
+    }).catch(err => console.error('viewRequest error:', err));
 }
 
 function closeModal() {
     document.getElementById('requestModal').style.display = 'none';
+}
+
+// Render [Designation] tags as coloured badges in the passenger list
+function formatPassengers(raw) {
+    if (!raw) return '—';
+    return raw.split(',').map(p => {
+        p = p.trim();
+        const m = p.match(/^\[([^\]]+)\]\s*(.+)$/);
+        if (m) {
+            return '<span style="display:inline-block;margin:2px 4px 2px 0;">'
+                 + '<span style="background:#e8f5e9;color:#1e7e34;padding:2px 8px;border-radius:10px;'
+                 + 'font-size:11px;font-weight:700;text-transform:uppercase;margin-right:4px;">'
+                 + escHtml(m[1]) + '</span>'
+                 + escHtml(m[2])
+                 + '</span>';
+        }
+        return escHtml(p);
+    }).join('<br>');
+}
+
+function escHtml(s) {
+    return String(s)
+        .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+        .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
 function printRequest(requestId) {

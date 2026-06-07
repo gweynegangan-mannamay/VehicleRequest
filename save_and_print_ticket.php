@@ -132,7 +132,7 @@ if ($request_id > 0) {
             $vehicle_name
         );
 
-        // Email notification (PHPMailer — only fires if library is installed)
+        // Email notification
         if (!empty($user_data['email'])) {
             sendTicketReadyEmail(
                 $user_data['email'],
@@ -141,7 +141,8 @@ if ($request_id > 0) {
                 $formatted_date,
                 $driver_name,
                 $vehicle_name,
-                $plate_number
+                $plate_number,
+                $trip_id          // ← pass trip_id so email links directly to ticket
             );
         }
     }

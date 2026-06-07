@@ -408,9 +408,16 @@ $current_date = date('F j, Y');
             if (!empty($passenger_list)) {
                 foreach ($passenger_list as $passenger) {
                     if (!empty($passenger)) {
+                        // Parse [Designation] prefix — e.g. "[Student] Juan Dela Cruz"
+                        $designation = 'CAMPUS OFFICIALS';
+                        $clean_name  = $passenger;
+                        if (preg_match('/^\[([^\]]+)\]\s*(.+)$/', $passenger, $m)) {
+                            $designation = strtoupper($m[1]);
+                            $clean_name  = $m[2];
+                        }
                         echo '<tr>';
-                        echo '<td style="text-transform: uppercase; font-weight: bold;">' . htmlspecialchars($passenger) . '</td>';
-                        echo '<td style="text-transform: uppercase; font-weight: bold;">CAMPUS OFFICIALS</td>';
+                        echo '<td style="text-transform: uppercase; font-weight: bold;">' . htmlspecialchars($clean_name) . '</td>';
+                        echo '<td style="text-transform: uppercase; font-weight: bold;">' . htmlspecialchars($designation) . '</td>';
                         echo '<td>&nbsp;</td>';
                         echo '</tr>';
                     }
